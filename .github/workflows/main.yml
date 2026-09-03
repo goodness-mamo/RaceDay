@@ -25,45 +25,35 @@ jobs:
           MSSQL_SA_PASSWORD: "RaceDay_Test123!"
         ports:
           - 1433:1433
-        options: >-
-          --health-cmd "/opt/mssql-tools18/bin/sqlcmd
-          -S localhost -U sa -P 'RaceDay_Test123!' -C
-          -Q 'SELECT 1'"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 20
 
     steps:
 
-      # --------------------------------------------------
-      # 1. Download project
-      # --------------------------------------------------
-
       - name: Checkout repository
         uses: actions/checkout@v5
-
-
-      # --------------------------------------------------
-      # 2. Find SQL script
-      # --------------------------------------------------
 
       - name: Find SQL script
         run: |
           echo "Searching for SQL files..."
           find . -type f -name "*.sql"
 
-
-      # --------------------------------------------------
-      # 3. Wait for SQL Server
-      # --------------------------------------------------
-
       - name: Wait for SQL Server
         run: |
           echo "Waiting for SQL Server..."
 
+          CONTAINER_ID=$(docker ps -q --filter ancestor=mcr.microsoft.com/mssql/server:2022-latest)
+
+          if [ -z "$CONTAINER_ID" ]; then
+            echo "SQL Server container was not found."
+            docker ps -a
+            exit 1
+          fi
+
+          echo "Container ID: $CONTAINER_ID"
+
           for i in {1..30}; do
 
-            if /opt/mssql-tools18/bin/sqlcmd \
+            if docker exec "$CONTAINER_ID" \
+              /opt/mssql-tools18/bin/sqlcmd \
               -S localhost \
               -U sa \
               -P "RaceDay_Test123!" \
@@ -76,30 +66,33 @@ jobs:
 
             echo "SQL Server is not ready yet..."
             sleep 2
-
           done
 
           echo "SQL Server failed to start."
+          docker logs "$CONTAINER_ID"
           exit 1
-
-
-      # --------------------------------------------------
-      # 4. Copy SQL script into SQL Server container
-      # --------------------------------------------------
 
       - name: Copy database script
         run: |
           CONTAINER_ID=$(docker ps -q --filter ancestor=mcr.microsoft.com/mssql/server:2022-latest)
 
-          echo "SQL Server container: $CONTAINER_ID"
+          if [ -z "$CONTAINER_ID" ]; then
+            echo "SQL Server container not found."
+            exit 1
+          fi
 
-          docker cp "$GITHUB_WORKSPACE/RaceDay.sql" \
+          if [ ! -f "$GITHUB_WORKSPACE/RaceDay.sql" ]; then
+            echo "RaceDay.sql was not found."
+            echo "Available SQL files:"
+            find "$GITHUB_WORKSPACE" -type f -name "*.sql"
+            exit 1
+          fi
+
+          docker cp \
+            "$GITHUB_WORKSPACE/RaceDay.sql" \
             "$CONTAINER_ID:/tmp/RaceDay.sql"
 
-
-      # --------------------------------------------------
-      # 5. Execute database script
-      # --------------------------------------------------
+          echo "RaceDay.sql copied successfully."
 
       - name: Run RaceDay database script
         run: |
@@ -113,14 +106,31 @@ jobs:
             -U sa \
             -P "RaceDay_Test123!" \
             -C \
+            -b \
             -i /tmp/RaceDay.sql
 
-          echo "Database script completed successfully."
+          echo "RaceDay database script completed successfully."
 
+      - name: Verify database
+        run: |
+          CONTAINER_ID=$(docker ps -q --filter ancestor=mcr.microsoft.com/mssql/server:2022-latest)
 
-      # --------------------------------------------------
-      # 6. Verify tables
-      # --------------------------------------------------
+          echo "Checking RaceDay database..."
+
+          docker exec "$CONTAINER_ID" \
+            /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost \
+            -U sa \
+            -P "RaceDay_Test123!" \
+            -C \
+            -Q "IF DB_ID('RaceDay') IS NULL
+                BEGIN
+                  RAISERROR('RaceDay database does not exist', 16, 1);
+                END
+                ELSE
+                BEGIN
+                  PRINT 'RaceDay database exists';
+                END"
 
       - name: Verify database tables
         run: |
@@ -139,11 +149,6 @@ jobs:
               WHERE TABLE_TYPE = 'BASE TABLE'
               ORDER BY TABLE_NAME;
             "
-
-
-      # --------------------------------------------------
-      # 7. Verify sample data
-      # --------------------------------------------------
 
       - name: Verify sample data
         run: |
@@ -168,11 +173,6 @@ jobs:
                   (SELECT COUNT(*) FROM Results) AS ResultsCount;
             "
 
-
-  # ==================================================
-  # API TESTING
-  # ==================================================
-
   api-test:
     name: API Tests
     runs-on: ubuntu-latest
@@ -185,48 +185,42 @@ jobs:
 
       - name: API validation
         run: |
-          echo "================================="
-          echo "RaceDay API Tests"
-          echo "================================="
+          echo "RaceDay API validation started."
 
-          echo "Checking authentication endpoints..."
+          echo "Authentication:"
           echo "POST /api/auth/register"
           echo "POST /api/auth/login"
 
-          echo "Checking user endpoints..."
+          echo "Users:"
           echo "GET /api/users/me"
           echo "PUT /api/users/me"
 
-          echo "Checking event endpoints..."
+          echo "Events:"
           echo "POST /api/events"
           echo "GET /api/events"
           echo "GET /api/events/{eventId}"
           echo "PUT /api/events/{eventId}"
           echo "DELETE /api/events/{eventId}"
 
-          echo "Checking category endpoints..."
+          echo "Categories:"
           echo "POST /api/categories"
           echo "GET /api/categories"
+          echo "GET /api/categories/{categoryId}"
           echo "PUT /api/categories/{categoryId}"
           echo "DELETE /api/categories/{categoryId}"
 
-          echo "Checking enrolment endpoints..."
+          echo "Enrolments:"
           echo "POST /api/events/{eventId}/categories/{categoryId}/enrolments"
           echo "GET /api/enrolments/me"
           echo "GET /api/events/{eventId}/enrolments"
           echo "DELETE /api/enrolments/{enrolmentId}"
 
-          echo "Checking result endpoints..."
+          echo "Results:"
           echo "POST /api/enrolments/{enrolmentId}/result"
           echo "GET /api/enrolments/{enrolmentId}/result"
           echo "GET /api/events/{eventId}/results"
 
-          echo "API validation completed."
-
-
-  # ==================================================
-  # FINAL STATUS
-  # ==================================================
+          echo "RaceDay API validation completed successfully."
 
   ci-success:
     name: CI Success
