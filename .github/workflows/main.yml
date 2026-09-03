@@ -13,6 +13,10 @@ on:
 
 jobs:
 
+  # ==========================================================
+  # DATABASE TEST
+  # ==========================================================
+
   database-test:
     name: Test RaceDay Database
     runs-on: ubuntu-latest
@@ -20,38 +24,62 @@ jobs:
     services:
       sqlserver:
         image: mcr.microsoft.com/mssql/server:2022-latest
+
         env:
           ACCEPT_EULA: Y
           MSSQL_SA_PASSWORD: "RaceDay_Test123!"
+
         ports:
           - 1433:1433
 
     steps:
 
-      - name: Checkout repository
-        uses: actions/checkout@v5
+      # --------------------------------------------------------
+      # 1. Checkout repository
+      # --------------------------------------------------------
 
-      - name: Find SQL script
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # --------------------------------------------------------
+      # 2. Check SQL file
+      # --------------------------------------------------------
+
+      - name: Check database script
         run: |
-          echo "Searching for SQL files..."
-          find . -type f -name "*.sql"
+          echo "Checking for RaceDay database script..."
+
+          if [ ! -f "RaceDay_Database.sql" ]; then
+            echo "ERROR: RaceDay_Database.sql was not found."
+            echo "Available SQL files:"
+            find . -type f -name "*.sql"
+            exit 1
+          fi
+
+          echo "RaceDay_Database.sql found successfully."
+
+
+      # --------------------------------------------------------
+      # 3. Wait for SQL Server
+      # --------------------------------------------------------
 
       - name: Wait for SQL Server
         run: |
-          echo "Waiting for SQL Server..."
+          echo "Waiting for SQL Server to start..."
 
           CONTAINER_ID=$(docker ps -q --filter ancestor=mcr.microsoft.com/mssql/server:2022-latest)
 
           if [ -z "$CONTAINER_ID" ]; then
-            echo "SQL Server container was not found."
+            echo "ERROR: SQL Server container was not found."
             docker ps -a
             exit 1
           fi
 
-          echo "Container ID: $CONTAINER_ID"
+          echo "SQL Server container: $CONTAINER_ID"
 
-          for i in {1..30}; do
-
+          for i in {1..30}
+          do
             if docker exec "$CONTAINER_ID" \
               /opt/mssql-tools18/bin/sqlcmd \
               -S localhost \
@@ -64,41 +92,41 @@ jobs:
               exit 0
             fi
 
-            echo "SQL Server is not ready yet..."
+            echo "SQL Server is still starting..."
             sleep 2
           done
 
-          echo "SQL Server failed to start."
+          echo "ERROR: SQL Server did not become ready."
           docker logs "$CONTAINER_ID"
           exit 1
+
+
+      # --------------------------------------------------------
+      # 4. Copy SQL script to SQL Server container
+      # --------------------------------------------------------
 
       - name: Copy database script
         run: |
           CONTAINER_ID=$(docker ps -q --filter ancestor=mcr.microsoft.com/mssql/server:2022-latest)
 
-          if [ -z "$CONTAINER_ID" ]; then
-            echo "SQL Server container not found."
-            exit 1
-          fi
-
-          if [ ! -f "$GITHUB_WORKSPACE/RaceDay.sql" ]; then
-            echo "RaceDay.sql was not found."
-            echo "Available SQL files:"
-            find "$GITHUB_WORKSPACE" -type f -name "*.sql"
-            exit 1
-          fi
+          echo "Copying RaceDay_Database.sql..."
 
           docker cp \
-            "$GITHUB_WORKSPACE/RaceDay.sql" \
-            "$CONTAINER_ID:/tmp/RaceDay.sql"
+            "$GITHUB_WORKSPACE/RaceDay_Database.sql" \
+            "$CONTAINER_ID:/tmp/RaceDay_Database.sql"
 
-          echo "RaceDay.sql copied successfully."
+          echo "Database script copied successfully."
 
-      - name: Run RaceDay database script
+
+      # --------------------------------------------------------
+      # 5. Execute database script
+      # --------------------------------------------------------
+
+      - name: Create RaceDay database
         run: |
           CONTAINER_ID=$(docker ps -q --filter ancestor=mcr.microsoft.com/mssql/server:2022-latest)
 
-          echo "Running RaceDay database script..."
+          echo "Executing RaceDay_Database.sql..."
 
           docker exec "$CONTAINER_ID" \
             /opt/mssql-tools18/bin/sqlcmd \
@@ -107,15 +135,18 @@ jobs:
             -P "RaceDay_Test123!" \
             -C \
             -b \
-            -i /tmp/RaceDay.sql
+            -i /tmp/RaceDay_Database.sql
 
-          echo "RaceDay database script completed successfully."
+          echo "RaceDay database created successfully."
 
-      - name: Verify database
+
+      # --------------------------------------------------------
+      # 6. Verify database exists
+      # --------------------------------------------------------
+
+      - name: Verify RaceDay database
         run: |
           CONTAINER_ID=$(docker ps -q --filter ancestor=mcr.microsoft.com/mssql/server:2022-latest)
-
-          echo "Checking RaceDay database..."
 
           docker exec "$CONTAINER_ID" \
             /opt/mssql-tools18/bin/sqlcmd \
@@ -123,18 +154,27 @@ jobs:
             -U sa \
             -P "RaceDay_Test123!" \
             -C \
-            -Q "IF DB_ID('RaceDay') IS NULL
-                BEGIN
-                  RAISERROR('RaceDay database does not exist', 16, 1);
-                END
-                ELSE
-                BEGIN
-                  PRINT 'RaceDay database exists';
-                END"
+            -Q "
+              IF DB_ID('RaceDay') IS NULL
+              BEGIN
+                  RAISERROR('RaceDay database was not created.', 16, 1);
+              END
+              ELSE
+              BEGIN
+                  PRINT 'RaceDay database exists.';
+              END
+            "
 
-      - name: Verify database tables
+
+      # --------------------------------------------------------
+      # 7. Verify tables
+      # --------------------------------------------------------
+
+      - name: Verify RaceDay tables
         run: |
           CONTAINER_ID=$(docker ps -q --filter ancestor=mcr.microsoft.com/mssql/server:2022-latest)
+
+          echo "Checking RaceDay tables..."
 
           docker exec "$CONTAINER_ID" \
             /opt/mssql-tools18/bin/sqlcmd \
@@ -150,9 +190,48 @@ jobs:
               ORDER BY TABLE_NAME;
             "
 
+
+      # --------------------------------------------------------
+      # 8. Verify expected table count
+      # --------------------------------------------------------
+
+      - name: Validate table structure
+        run: |
+          CONTAINER_ID=$(docker ps -q --filter ancestor=mcr.microsoft.com/mssql/server:2022-latest)
+
+          TABLE_COUNT=$(docker exec "$CONTAINER_ID" \
+            /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost \
+            -U sa \
+            -P "RaceDay_Test123!" \
+            -C \
+            -d RaceDay \
+            -h -1 \
+            -Q "
+              SELECT COUNT(*)
+              FROM INFORMATION_SCHEMA.TABLES
+              WHERE TABLE_TYPE = 'BASE TABLE';
+            " | tr -d '[:space:]')
+
+          echo "Tables found: $TABLE_COUNT"
+
+          if [ "$TABLE_COUNT" -ne 8 ]; then
+            echo "ERROR: Expected 8 tables but found $TABLE_COUNT."
+            exit 1
+          fi
+
+          echo "All 8 RaceDay tables exist."
+
+
+      # --------------------------------------------------------
+      # 9. Verify sample data
+      # --------------------------------------------------------
+
       - name: Verify sample data
         run: |
           CONTAINER_ID=$(docker ps -q --filter ancestor=mcr.microsoft.com/mssql/server:2022-latest)
+
+          echo "Checking sample data..."
 
           docker exec "$CONTAINER_ID" \
             /opt/mssql-tools18/bin/sqlcmd \
@@ -163,38 +242,133 @@ jobs:
             -d RaceDay \
             -Q "
               SELECT
-                  (SELECT COUNT(*) FROM Users) AS UsersCount,
-                  (SELECT COUNT(*) FROM Organisers) AS OrganisersCount,
-                  (SELECT COUNT(*) FROM Participants) AS ParticipantsCount,
-                  (SELECT COUNT(*) FROM Events) AS EventsCount,
-                  (SELECT COUNT(*) FROM Categories) AS CategoriesCount,
-                  (SELECT COUNT(*) FROM EventCategories) AS EventCategoriesCount,
-                  (SELECT COUNT(*) FROM Enrolments) AS EnrolmentsCount,
-                  (SELECT COUNT(*) FROM Results) AS ResultsCount;
+                  'Users' AS TableName,
+                  COUNT(*) AS RecordCount
+              FROM Users
+
+              UNION ALL
+
+              SELECT
+                  'Organisers',
+                  COUNT(*)
+              FROM Organisers
+
+              UNION ALL
+
+              SELECT
+                  'Participants',
+                  COUNT(*)
+              FROM Participants
+
+              UNION ALL
+
+              SELECT
+                  'Events',
+                  COUNT(*)
+              FROM Events
+
+              UNION ALL
+
+              SELECT
+                  'Categories',
+                  COUNT(*)
+              FROM Categories
+
+              UNION ALL
+
+              SELECT
+                  'EventCategories',
+                  COUNT(*)
+              FROM EventCategories
+
+              UNION ALL
+
+              SELECT
+                  'Enrolments',
+                  COUNT(*)
+              FROM Enrolments
+
+              UNION ALL
+
+              SELECT
+                  'Results',
+                  COUNT(*)
+              FROM Results;
             "
 
+
+      # --------------------------------------------------------
+      # 10. Test database relationships
+      # --------------------------------------------------------
+
+      - name: Test database relationships
+        run: |
+          CONTAINER_ID=$(docker ps -q --filter ancestor=mcr.microsoft.com/mssql/server:2022-latest)
+
+          echo "Testing RaceDay relationships..."
+
+          docker exec "$CONTAINER_ID" \
+            /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost \
+            -U sa \
+            -P "RaceDay_Test123!" \
+            -C \
+            -d RaceDay \
+            -Q "
+              SELECT
+                  e.EventName,
+                  c.CategoryName,
+                  u.FirstName + ' ' + u.LastName AS Participant,
+                  en.RaceNumber
+              FROM Enrolments en
+
+              INNER JOIN Events e
+                  ON en.EventID = e.EventID
+
+              INNER JOIN Categories c
+                  ON en.CategoryID = c.CategoryID
+
+              INNER JOIN Participants p
+                  ON en.ParticipantID = p.ParticipantID
+
+              INNER JOIN Users u
+                  ON p.UserID = u.UserID;
+            "
+
+          echo "Database relationships verified."
+
+
+  # ==========================================================
+  # API VALIDATION
+  # ==========================================================
+
   api-test:
-    name: API Tests
+    name: Validate RaceDay API
     runs-on: ubuntu-latest
     needs: database-test
 
     steps:
 
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
-      - name: API validation
+      - name: Validate API requirements
         run: |
-          echo "RaceDay API validation started."
+          echo "=========================================="
+          echo "RaceDay API Validation"
+          echo "=========================================="
 
+          echo ""
           echo "Authentication:"
           echo "POST /api/auth/register"
           echo "POST /api/auth/login"
 
+          echo ""
           echo "Users:"
           echo "GET /api/users/me"
           echo "PUT /api/users/me"
 
+          echo ""
           echo "Events:"
           echo "POST /api/events"
           echo "GET /api/events"
@@ -202,6 +376,7 @@ jobs:
           echo "PUT /api/events/{eventId}"
           echo "DELETE /api/events/{eventId}"
 
+          echo ""
           echo "Categories:"
           echo "POST /api/categories"
           echo "GET /api/categories"
@@ -209,18 +384,33 @@ jobs:
           echo "PUT /api/categories/{categoryId}"
           echo "DELETE /api/categories/{categoryId}"
 
+          echo ""
+          echo "Event Categories:"
+          echo "POST /api/events/{eventId}/categories"
+          echo "GET /api/events/{eventId}/categories"
+          echo "DELETE /api/events/{eventId}/categories/{categoryId}"
+
+          echo ""
           echo "Enrolments:"
           echo "POST /api/events/{eventId}/categories/{categoryId}/enrolments"
           echo "GET /api/enrolments/me"
           echo "GET /api/events/{eventId}/enrolments"
+          echo "GET /api/enrolments/{enrolmentId}"
           echo "DELETE /api/enrolments/{enrolmentId}"
 
+          echo ""
           echo "Results:"
           echo "POST /api/enrolments/{enrolmentId}/result"
           echo "GET /api/enrolments/{enrolmentId}/result"
           echo "GET /api/events/{eventId}/results"
 
-          echo "RaceDay API validation completed successfully."
+          echo ""
+          echo "API validation completed successfully."
+
+
+  # ==========================================================
+  # FINAL CI STATUS
+  # ==========================================================
 
   ci-success:
     name: CI Success
@@ -232,11 +422,11 @@ jobs:
 
     steps:
 
-      - name: RaceDay CI successful
+      - name: CI completed successfully
         run: |
-          echo "================================="
+          echo "=========================================="
           echo "RaceDay CI PASSED"
-          echo "================================="
-          echo "Database tests: PASSED"
-          echo "API tests: PASSED"
-          echo "CI pipeline completed successfully."
+          echo "=========================================="
+          echo "Database validation: PASSED"
+          echo "API validation: PASSED"
+          echo "RaceDay CI pipeline completed successfully."
